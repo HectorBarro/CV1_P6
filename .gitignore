@@ -1,0 +1,11 @@
+# Resultados de entrenamiento (modelos, gráficas, métricas)
+resultados/
+
+# Pesos de modelos
+*.pth
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

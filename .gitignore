@@ -1,9 +1,9 @@
-# Resultados de entrenamiento: se ignoran pesos y figuras, pero se suben los .json
-# (métricas, curvas, TIDE y predicciones), que pesan poco y permiten comparar experimentos
-# desde Kaggle/Colab sin volver a entrenar
-resultados/**/*
-!resultados/**/
-!resultados/**/*.json
+# Resultados de entrenamiento (en la carpeta de cada modelo, p. ej. faster_rcnn/resultados/):
+# se ignoran pesos y figuras, pero se suben los .json (métricas, curvas, TIDE y predicciones),
+# que pesan poco y permiten comparar experimentos desde Kaggle/Colab sin volver a entrenar
+**/resultados/**/*
+!**/resultados/**/
+!**/resultados/**/*.json
 
 # Pesos de modelos
 *.pth

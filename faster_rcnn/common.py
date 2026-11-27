@@ -13,7 +13,12 @@ Contenido:
     - Análisis de errores: `collect_predictions`, `tide_analysis` (usa `mapviz.py`).
     - Comparación: `load_experiment`, `compare_metrics`, `compare_tide`, `plot_history_comparison`.
 
-Convención de resultados: cada experimento escribe en `resultados/<nombre>/`:
+Estructura del repositorio: cada modelo tiene su carpeta (este código está en `faster_rcnn/`) y
+`mapviz.py` está en la raíz, compartido. Los cuadernos se ejecutan con la carpeta del modelo como
+directorio de trabajo (lo que hace Jupyter por defecto); en Kaggle o Colab los ficheros que faltan
+se descargan del repositorio.
+
+Convención de resultados: cada experimento escribe en `faster_rcnn/resultados/<nombre>/`:
     results.json  (métricas y configuración)   history.json  (curvas por época)
     tide.json     (descomposición TIDE)        preds_<split>.json (predicciones, para ensembles/TTA)
     best_model.pth y figuras .png (estos no se suben al repositorio)
@@ -34,7 +39,8 @@ from torchvision import tv_tensors
 from torchvision.transforms import v2
 
 REPO_RAW = "https://raw.githubusercontent.com/HectorBarro/CV1_P6/main"
-RESULTS_ROOT = Path("resultados")
+MODEL_DIR = "faster_rcnn"            # carpeta de este modelo dentro del repositorio
+RESULTS_ROOT = Path("resultados")    # relativa al directorio de trabajo (= carpeta del modelo)
 
 DATASET = "Francesco/pills-sxdht"
 # Limpieza de clases (sección 4 del baseline): se descartan la supercategoría `pills` (id 0,
@@ -67,16 +73,21 @@ def hardware_name():
     return torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU"
 
 
-def ensure_file(relpath):
-    """Descarga `relpath` del repositorio del grupo si no existe en local (Kaggle / Colab)."""
-    path = Path(relpath)
+def ensure_file(local_path, repo_path=None):
+    """Devuelve `local_path`; si no existe (Kaggle / Colab), lo descarga del repositorio.
+
+    `repo_path` es su ruta desde la raíz del repositorio. Por defecto, la misma ruta dentro de
+    la carpeta del modelo (`faster_rcnn/<local_path>`).
+    """
+    path = Path(local_path)
     if path.exists():
         return path
+    repo_path = repo_path or f"{MODEL_DIR}/{path.as_posix()}"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        urllib.request.urlretrieve(f"{REPO_RAW}/{relpath}", path)
+        urllib.request.urlretrieve(f"{REPO_RAW}/{repo_path}", path)
     except Exception as e:
-        raise FileNotFoundError(f"No se encuentra {relpath} ni se pudo descargar del repositorio ({e})")
+        raise FileNotFoundError(f"No se encuentra {local_path} ni se pudo descargar {repo_path} del repositorio ({e})")
     return path
 
 
@@ -388,8 +399,13 @@ def measure_inference(model, dataset, n_warmup=5):
 def import_mapviz():
     import sys
 
-    ensure_file("mapviz.py")
-    sys.path.insert(0, ".")
+    # mapviz.py está en la raíz del repositorio, compartido por los dos modelos:
+    # en local es la carpeta padre; en Kaggle / Colab se descarga al directorio de trabajo
+    if Path("../mapviz.py").exists():
+        sys.path.insert(0, str(Path("..").resolve()))
+    else:
+        ensure_file("mapviz.py", repo_path="mapviz.py")
+        sys.path.insert(0, ".")
     import mapviz
 
     return mapviz
@@ -473,7 +489,7 @@ def save_experiment(out_dir, summary, tide=None):
 
 def load_experiment(name):
     """Carga results/history/tide de `resultados/<name>/`. Si no están en local (Kaggle, Colab),
-    los descarga del repositorio: los .json de resultados sí se suben a git."""
+    los descarga de `faster_rcnn/resultados/<name>/` del repositorio: los .json sí se suben a git."""
     folder = RESULTS_ROOT / name
     results_file = "baseline_results.json" if name == "baseline_fasterrcnn" else "results.json"
     out = {}

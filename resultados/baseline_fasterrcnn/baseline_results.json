@@ -1,0 +1,56 @@
+{
+  "modelo": "Faster R-CNN v2 (ResNet-50 + FPN), pesos COCO_V1",
+  "dataset": "Francesco/pills-sxdht",
+  "config": {
+    "seed": 42,
+    "epochs": 15,
+    "batch_size": 4,
+    "lr": 0.005,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "optimizer": "SGD",
+    "scheduler": null,
+    "augmentation": null
+  },
+  "mejor_epoca": 15,
+  "val_mAP": 0.88092440366745,
+  "test": {
+    "mAP@0.5:0.95": 0.8399323225021362,
+    "mAP@0.5": 0.9809266924858093,
+    "mAP@0.75": 0.9748163819313049,
+    "mAR@100": 0.8642457723617554,
+    "por_clase": {
+      "Cipro 500": {
+        "AP": 0.7859580386610089,
+        "AP50": 0.9176237623762377
+      },
+      "Ibuphil Cold 400-60": {
+        "AP": 0.8682618261826182,
+        "AP50": 1.0
+      },
+      "Xyzall 5mg": {
+        "AP": 0.8043361259202844,
+        "AP50": 0.9771515613099772
+      },
+      "blue": {
+        "AP": 0.8967553898246967,
+        "AP50": 1.0
+      },
+      "pink": {
+        "AP": 0.8859123055162659,
+        "AP50": 1.0
+      },
+      "red": {
+        "AP": 0.8385148514851486,
+        "AP50": 1.0
+      },
+      "white": {
+        "AP": 0.79978783592645,
+        "AP50": 0.9717114568599716
+      }
+    }
+  },
+  "inferencia_ms": 175.33009380898812,
+  "hardware": "Tesla T4",
+  "tiempo_entrenamiento_min": 39.36165723403295
+}

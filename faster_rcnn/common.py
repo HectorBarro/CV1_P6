@@ -375,6 +375,36 @@ def plot_pr_curves(res, classes, out_path=None):
 
 
 @torch.no_grad()
+def plot_examples(model, dataset, classes, out_path, n=6, seed=42, score_thr=0.5):
+    """Análisis cualitativo (sección 12 del baseline): imágenes de test al azar con las cajas reales
+    (verde) y las predicciones con score >= score_thr (rojo). Con la misma semilla que el baseline
+    salen las mismas imágenes, para comparar una a una."""
+    from torchvision.utils import draw_bounding_boxes
+
+    rng = np.random.default_rng(seed)
+    idxs = rng.choice(len(dataset), size=min(n, len(dataset)), replace=False)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    model.eval()
+    for ax, i in zip(axes.flat, idxs):
+        img, tgt = dataset[int(i)]
+        pred = model([img.to(device)])[0]
+        keep = pred["scores"] >= score_thr
+        canvas = (img * 255).to(torch.uint8)
+        canvas = draw_bounding_boxes(canvas, tgt["boxes"], colors="lime", width=3)
+        canvas = draw_bounding_boxes(
+            canvas, pred["boxes"][keep].cpu(), colors="red", width=2, font_size=14,
+            labels=[f"{classes[l]} {s:.2f}" for l, s in zip(pred["labels"][keep].tolist(), pred["scores"][keep].tolist())],
+        )
+        ax.imshow(canvas.permute(1, 2, 0))
+        ax.set_title(f"test #{i} | GT: {', '.join(classes[l] for l in tgt['labels'].tolist())}", fontsize=9)
+        ax.axis("off")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=110)
+    plt.show()
+    return idxs
+
+
+@torch.no_grad()
 def measure_inference(model, dataset, n_warmup=5):
     """ms por imagen con batch 1, incluyendo pre y post-procesado del modelo (no la E/S)."""
     model.eval()
@@ -561,6 +591,24 @@ def plot_confusion(split_data, classes, out_path, score_thr=0.5, iou_thr=0.5):
     plt.savefig(out_path, dpi=120)
     plt.show()
     return cms
+
+
+def print_confusion_summary(cms, classes):
+    """Resumen en texto de las matrices de `plot_confusion`: aciertos y cada tipo de error."""
+    names = classes[1:]
+    n = len(names)
+    for split, cm in cms.items():
+        off = [(names[i], names[j], cm[i, j]) for i in range(n) for j in range(n) if i != j and cm[i, j]]
+        fp = [(names[j], cm[n, j]) for j in range(n) if cm[n, j]]
+        miss = [(names[i], cm[i, n]) for i in range(n) if cm[i, n]]
+        print(f"{split}: {np.trace(cm[:n, :n])} aciertos | {sum(c for *_, c in off)} confusiones entre clases | "
+              f"{cm[n, :n].sum()} falsos positivos de fondo | {cm[:n, n].sum()} no detectadas")
+        for a, b, c in off:
+            print(f"   confusión  {a} -> {b}: {c}")
+        for a, c in fp:
+            print(f"   fondo detectado como {a}: {c}")
+        for a, c in miss:
+            print(f"   {a} no detectada: {c}")
 
 
 def plot_worst_images(gts, preds, tide_result, dataset, out_path, n=6, min_score=0.3):

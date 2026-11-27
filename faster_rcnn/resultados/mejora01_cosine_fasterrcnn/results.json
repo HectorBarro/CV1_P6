@@ -1,0 +1,58 @@
+{
+  "experimento": "mejora01_cosine_fasterrcnn",
+  "descripcion": "30 épocas con warmup lineal (1 época) + cosine annealing del LR, por iteración",
+  "modelo": "Faster R-CNN v2 (ResNet-50 + FPN), pesos COCO_V1",
+  "dataset": "Francesco/pills-sxdht",
+  "config": {
+    "seed": 42,
+    "epochs": 30,
+    "batch_size": 4,
+    "lr": 0.005,
+    "momentum": 0.9,
+    "weight_decay": 0.0005,
+    "optimizer": "SGD",
+    "scheduler": "warmup lineal 1 época (x0.001) + cosine hasta x0.0, por iteración",
+    "augmentation": null
+  },
+  "mejor_epoca": 24,
+  "val_mAP": 0.917943000793457,
+  "test": {
+    "mAP@0.5:0.95": 0.8668665885925293,
+    "mAP@0.5": 0.9848150610923767,
+    "mAP@0.75": 0.9848150610923767,
+    "mAR@100": 0.8885281682014465,
+    "por_clase": {
+      "Cipro 500": {
+        "AP": 0.8281450513337779,
+        "AP50": 0.9192079207920792
+      },
+      "Ibuphil Cold 400-60": {
+        "AP": 0.8946974697469747,
+        "AP50": 1.0
+      },
+      "Xyzall 5mg": {
+        "AP": 0.8288778877887787,
+        "AP50": 0.9834983498349833
+      },
+      "blue": {
+        "AP": 0.924059405940594,
+        "AP50": 1.0
+      },
+      "pink": {
+        "AP": 0.9160066006600661,
+        "AP50": 1.0
+      },
+      "red": {
+        "AP": 0.851981351981352,
+        "AP50": 1.0
+      },
+      "white": {
+        "AP": 0.8242981441001244,
+        "AP50": 0.9909990999099911
+      }
+    }
+  },
+  "inferencia_ms": 173.85944153932982,
+  "hardware": "Tesla T4",
+  "tiempo_entrenamiento_min": 78.37142899036408
+}

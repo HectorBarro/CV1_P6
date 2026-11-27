@@ -10,7 +10,8 @@ Contenido:
     - Modelo: `build_model` (Faster R-CNN v2 COCO_V1 con cabeza nueva).
     - Entrenamiento: `train_one_epoch`, `validation_loss`, `evaluate`, `fit`, schedulers.
     - Evaluación en test: `test_report`, `plot_pr_curves`, `measure_inference`.
-    - Análisis de errores: `collect_predictions`, `tide_analysis` (usa `mapviz.py`).
+    - Análisis de errores: `collect_predictions`, `tide_analysis` (usa `mapviz.py`) y
+      `error_analysis_figures` (AP vs IoU, TIDE, matriz de confusión, peores imágenes).
     - Comparación: `load_experiment`, `compare_metrics`, `compare_tide`, `plot_history_comparison`.
 
 Estructura del repositorio: cada modelo tiene su carpeta (este código está en `faster_rcnn/`) y
@@ -451,6 +452,137 @@ def save_predictions(split_data, out_dir):
     """Guarda gts y predicciones por partición (sirven para TTA, ensembles y la comparativa final)."""
     for name, (gts, preds) in split_data.items():
         _save_json({"gts": gts, "preds": preds}, Path(out_dir) / f"preds_{name}.json")
+
+
+def load_predictions(name, splits=("valid", "test")):
+    """Lee `resultados/<name>/preds_<split>.json` -> {split: (gts, preds)}, o None si no existen."""
+    out = {}
+    for split in splits:
+        try:
+            d = _load_json(ensure_file(f"{(RESULTS_ROOT / name).as_posix()}/preds_{split}.json"))
+        except FileNotFoundError:
+            return None
+        to_t = lambda xs: [{**x, "box": tuple(x["box"])} for x in xs]
+        out[split] = (to_t(d["gts"]), to_t(d["preds"]))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Figuras del análisis de errores (las mismas que la sección 13 del baseline)
+# ----------------------------------------------------------------------------
+def show_and_save(plot_fn, out_path, *args, **kwargs):
+    """Las funciones de mapviz llaman a plt.show(); se intercepta para poder guardar la figura."""
+    original_show = plt.show
+    plt.show = lambda *a, **k: None
+    try:
+        plot_fn(*args, **kwargs)
+    finally:
+        plt.show = original_show
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.show()
+
+
+def plot_ap_vs_iou(split_data, label, out_dir, references=None):
+    """AP en función del umbral de IoU por partición (sección 13.2 del baseline).
+    `references` = {etiqueta: split_data de otro experimento}, para superponer sus curvas."""
+    mv = import_mapviz()
+    for split, (gts, preds) in split_data.items():
+        models = {f"{name} ({split})": ref[split][1] for name, ref in (references or {}).items() if ref}
+        models[f"{label} ({split})"] = preds
+        show_and_save(mv.plot_ap_vs_iou, Path(out_dir) / f"ap_vs_iou_{split}.png", gts, models)
+
+
+def plot_tide(tide, out_path):
+    """Barras de ΔAP por tipo de error, una por partición y umbral (sección 13.3 del baseline)."""
+    mv = import_mapviz()
+    splits = sorted({k.split("@")[0] for k in tide}, key=["valid", "test"].index)
+    thrs = sorted({k.split("@")[1] for k in tide}, key=float)
+    fig, axes = plt.subplots(len(splits), len(thrs), figsize=(13, 3.6 * len(splits)), squeeze=False)
+    xmax = max(max(r["delta"].values()) for r in tide.values()) * 1.3 + 1e-3
+    for i, s in enumerate(splits):
+        for j, t in enumerate(thrs):
+            r = tide[f"{s}@{t}"]
+            mv._bars(axes[i, j], r, xmax=xmax, title=f"{s} | IoU {t} | AP base = {r['base']:.3f}")
+            axes[i, j].set_xlabel("ΔAP si se corrige ese tipo de error (nº de errores entre paréntesis)")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    plt.show()
+
+
+def detection_confusion(gts, preds, classes, score_thr=0.5, iou_thr=0.5):
+    """Matriz de confusión de detección (sección 13.4 del baseline).
+
+    Cada caja real se empareja con la detección de mayor score (≥ score_thr) que la solape con
+    IoU ≥ iou_thr, sea de la clase que sea; si no hay, cuenta como "no detectado". Las detecciones
+    sin emparejar cuentan en la fila "fondo". Filas: clase real (+ fondo); columnas: predicha (+ no detectado).
+    """
+    mv = import_mapviz()
+    names = classes[1:]
+    n = len(names)
+    cm = np.zeros((n + 1, n + 1), dtype=int)
+    pos = {c: i for i, c in enumerate(names)}
+    for img in sorted({g["img"] for g in gts} | {p["img"] for p in preds}, key=int):
+        g_img = [g for g in gts if g["img"] == img]
+        p_img = sorted([p for p in preds if p["img"] == img and p["score"] >= score_thr], key=lambda p: -p["score"])
+        used = set()
+        for g in g_img:
+            cand = [(p["score"], k) for k, p in enumerate(p_img) if k not in used and mv.iou(g["box"], p["box"]) >= iou_thr]
+            if cand:
+                _, k = max(cand)
+                used.add(k)
+                cm[pos[g["cls"]], pos[p_img[k]["cls"]]] += 1
+            else:
+                cm[pos[g["cls"]], n] += 1
+        for k, p in enumerate(p_img):
+            if k not in used:
+                cm[n, pos[p["cls"]]] += 1
+    return cm
+
+
+def plot_confusion(split_data, classes, out_path, score_thr=0.5, iou_thr=0.5):
+    fig, axes = plt.subplots(1, len(split_data), figsize=(7.5 * len(split_data), 6.5), squeeze=False)
+    rows = classes[1:] + ["fondo (FP)"]
+    cols = classes[1:] + ["no detectado"]
+    cms = {}
+    for ax, (name, (gts, preds)) in zip(axes[0], split_data.items()):
+        cm = cms[name] = detection_confusion(gts, preds, classes, score_thr, iou_thr)
+        ax.imshow(np.log1p(cm), cmap="Blues")
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                if cm[i, j]:
+                    color = ("white" if cm[i, j] > 3 else "black") if i == j else "darkred"
+                    ax.text(j, i, cm[i, j], ha="center", va="center", fontsize=10, color=color)
+        ax.set_xticks(range(len(cols)), cols, rotation=45, ha="right")
+        ax.set_yticks(range(len(rows)), rows)
+        ax.set_xlabel("predicción")
+        ax.set_ylabel("clase real")
+        ax.set_title(f"{name} (score ≥ {score_thr}, IoU ≥ {iou_thr})")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=120)
+    plt.show()
+    return cms
+
+
+def plot_worst_images(gts, preds, tide_result, dataset, out_path, n=6, min_score=0.3):
+    """Imágenes con más errores (sección 13.5 del baseline). `tide_result` = tide["test@0.5"]."""
+    mv = import_mapviz()
+    worst = mv.worst_images(gts, preds, tide_result, n=n)
+    images_np = {img: dataset[int(img)][0].permute(1, 2, 0).numpy() for img in worst}
+    show_and_save(mv.show_errors, out_path, gts, preds, tide_result, worst,
+                  image=images_np, ncols=3, min_score=min_score)
+    return worst
+
+
+def error_analysis_figures(split_data, tide, classes, test_dataset, out_dir, label, references=None):
+    """Genera y guarda todas las figuras del análisis de errores del baseline:
+    ap_vs_iou_<split>.png, tide.png, matriz_confusion.png y peores_imagenes_test.png."""
+    out_dir = Path(out_dir)
+    plot_ap_vs_iou(split_data, label, out_dir, references)
+    plot_tide(tide, out_dir / "tide.png")
+    cms = plot_confusion(split_data, classes, out_dir / "matriz_confusion.png")
+    gts, preds = split_data["test"]
+    plot_worst_images(gts, preds, tide["test@0.5"], test_dataset, out_dir / "peores_imagenes_test.png")
+    return cms
 
 
 # ----------------------------------------------------------------------------

@@ -9,7 +9,9 @@ Contenido:
     - Datos: carga de Hugging Face, limpieza de clases, `PillsDataset`, DataLoaders.
     - Modelo: `build_model` (Faster R-CNN v2 COCO_V1 con cabeza nueva).
     - Entrenamiento: `train_one_epoch`, `validation_loss`, `evaluate`, `fit`, schedulers.
-    - Evaluación en test: `test_report`, `plot_pr_curves`, `measure_inference`.
+    - Evaluación en test: `test_report`, `plot_pr_curves`, `plot_examples`, `measure_inference`, y
+      `evaluate_predictions` / `results_report` para predicciones ya calculadas (TTA, ensembles).
+    - Fusión de detecciones de varias vistas o modelos: `wbf` (Weighted Boxes Fusion) y `nms_fusion`.
     - Análisis de errores: `collect_predictions`, `tide_analysis` (usa `mapviz.py`) y
       `error_analysis_figures` (AP vs IoU, TIDE, matriz de confusión, peores imágenes).
     - Comparación: `load_experiment`, `compare_metrics`, `compare_tide`, `plot_history_comparison`.
@@ -270,6 +272,16 @@ def evaluate(model, loader, extended=False):
     return metric.compute()
 
 
+def evaluate_predictions(preds, targets, extended=False):
+    """Como `evaluate`, pero a partir de predicciones ya calculadas (TTA, ensembles...).
+    `preds`: lista de dicts con boxes/scores/labels; `targets`: lista de dicts con boxes/labels."""
+    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox",
+                                  class_metrics=extended, extended_summary=extended)
+    metric.update([{k: v.cpu() for k, v in p.items()} for p in preds],
+                  [{"boxes": torch.as_tensor(t["boxes"]).cpu(), "labels": t["labels"].cpu()} for t in targets])
+    return metric.compute()
+
+
 def warmup_cosine_scheduler(optimizer, total_iters, warmup_iters, warmup_factor=0.001, min_factor=0.0):
     """LR por iteración: subida lineal desde `warmup_factor·lr` hasta `lr` en `warmup_iters`
     iteraciones y después bajada en coseno hasta `min_factor·lr` al final del entrenamiento."""
@@ -330,7 +342,12 @@ def _ap_from_precision(p):
 
 def test_report(model, loader, classes, verbose=True):
     """mAP de COCO en test y AP por clase, igual que la sección 10 del baseline."""
-    res = evaluate(model, loader, extended=True)
+    return results_report(evaluate(model, loader, extended=True), classes, verbose)
+
+
+def results_report(res, classes, verbose=True):
+    """AP por clase e impresión de las métricas a partir del resultado de `evaluate(..., extended=True)`
+    o de `evaluate_predictions(..., extended=True)`."""
     precision = res["precision"]  # [IoU, recall, clase, área, máx. dets]; -1 = sin objetos
     per_class = {}
     for k, c in enumerate(res["classes"].tolist()):
@@ -375,19 +392,22 @@ def plot_pr_curves(res, classes, out_path=None):
 
 
 @torch.no_grad()
-def plot_examples(model, dataset, classes, out_path, n=6, seed=42, score_thr=0.5):
+def plot_examples(model, dataset, classes, out_path, n=6, seed=42, score_thr=0.5, predict=None):
     """Análisis cualitativo (sección 12 del baseline): imágenes de test al azar con las cajas reales
     (verde) y las predicciones con score >= score_thr (rojo). Con la misma semilla que el baseline
-    salen las mismas imágenes, para comparar una a una."""
+    salen las mismas imágenes, para comparar una a una. `predict(img) -> dict` sustituye a la
+    llamada al modelo (p. ej. para TTA)."""
     from torchvision.utils import draw_bounding_boxes
 
+    predict = predict or (lambda img: model([img.to(device)])[0])
     rng = np.random.default_rng(seed)
     idxs = rng.choice(len(dataset), size=min(n, len(dataset)), replace=False)
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    model.eval()
+    if model is not None:
+        model.eval()
     for ax, i in zip(axes.flat, idxs):
         img, tgt = dataset[int(i)]
-        pred = model([img.to(device)])[0]
+        pred = predict(img)
         keep = pred["scores"] >= score_thr
         canvas = (img * 255).to(torch.uint8)
         canvas = draw_bounding_boxes(canvas, tgt["boxes"], colors="lime", width=3)
@@ -405,23 +425,106 @@ def plot_examples(model, dataset, classes, out_path, n=6, seed=42, score_thr=0.5
 
 
 @torch.no_grad()
-def measure_inference(model, dataset, n_warmup=5):
-    """ms por imagen con batch 1, incluyendo pre y post-procesado del modelo (no la E/S)."""
-    model.eval()
+def measure_inference(model, dataset, n_warmup=5, predict=None):
+    """ms por imagen con batch 1, incluyendo pre y post-procesado del modelo (no la E/S).
+    `predict(img)` sustituye a la llamada al modelo (p. ej. TTA: todas las vistas + fusión)."""
+    predict = predict or (lambda x: model([x]))
+    if model is not None:
+        model.eval()
     imgs = [dataset[i][0] for i in range(len(dataset))]
     for img in imgs[:n_warmup]:
-        model([img.to(device)])
+        predict(img.to(device))
     times = []
     for img in imgs:
         x = img.to(device)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        model([x])
+        predict(x)
         if device.type == "cuda":
             torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
     return np.array(times) * 1000
+
+
+# ----------------------------------------------------------------------------
+# Fusión de detecciones de varias fuentes (vistas de TTA o modelos de un ensemble)
+# ----------------------------------------------------------------------------
+def _empty_pred():
+    return {"boxes": torch.zeros((0, 4)), "scores": torch.zeros(0), "labels": torch.zeros(0, dtype=torch.int64)}
+
+
+def nms_fusion(preds_list, iou_thr=0.5, max_dets=100):
+    """Junta las detecciones de todas las fuentes y aplica NMS por clase: de cada grupo de cajas
+    solapadas se queda la de mayor score, sin modificarla."""
+    from torchvision.ops import batched_nms
+
+    boxes = torch.cat([p["boxes"].cpu() for p in preds_list])
+    if not len(boxes):
+        return _empty_pred()
+    scores = torch.cat([p["scores"].cpu() for p in preds_list])
+    labels = torch.cat([p["labels"].cpu() for p in preds_list])
+    keep = batched_nms(boxes, scores, labels, iou_thr)[:max_dets]
+    return {"boxes": boxes[keep], "scores": scores[keep], "labels": labels[keep]}
+
+
+def wbf(preds_list, iou_thr=0.55, max_dets=100, weights=None):
+    """Weighted Boxes Fusion (Solovyev et al., 2021), por clase.
+
+    Las cajas de todas las fuentes se recorren de mayor a menor score y se agrupan: una caja se
+    añade al grupo cuya caja fusionada solape con ella con IoU > iou_thr, o abre un grupo nuevo.
+    La caja fusionada de cada grupo es la **media de sus cajas ponderada por el score** (a diferencia
+    de NMS, que se queda con una sola). Su score es la media de los scores multiplicada por
+    min(n_cajas, n_fuentes) / n_fuentes: una detección que solo aparece en algunas fuentes baja.
+    `weights` pondera cada fuente (por defecto todas igual).
+    """
+    from torchvision.ops import box_iou
+
+    n_src = len(preds_list)
+    weights = weights or [1.0] * n_src
+    boxes = torch.cat([p["boxes"].cpu().float() for p in preds_list])
+    if not len(boxes):
+        return _empty_pred()
+    scores = torch.cat([p["scores"].cpu() * w for p, w in zip(preds_list, weights)])
+    labels = torch.cat([p["labels"].cpu() for p in preds_list])
+
+    out_b, out_s, out_l = [], [], []
+    for c in labels.unique():
+        m = labels == c
+        b, s = boxes[m], scores[m]
+        clusters, fused = [], []
+        for i in s.argsort(descending=True).tolist():
+            if fused:
+                ious = box_iou(b[i:i + 1], torch.stack(fused))[0]
+                j = int(ious.argmax())
+                if ious[j] > iou_thr:
+                    clusters[j].append(i)
+                    idx = torch.tensor(clusters[j])
+                    fused[j] = (b[idx] * s[idx, None]).sum(0) / s[idx].sum()
+                    continue
+            clusters.append([i])
+            fused.append(b[i].clone())
+        for idx, fb in zip(clusters, fused):
+            sc = s[torch.tensor(idx)]
+            out_b.append(fb)
+            out_s.append(sc.mean() * min(len(idx), n_src) / n_src / (sum(weights) / n_src))
+            out_l.append(c)
+    scores_t = torch.stack(out_s)
+    order = scores_t.argsort(descending=True)[:max_dets]
+    return {"boxes": torch.stack(out_b)[order], "scores": scores_t[order], "labels": torch.stack(out_l)[order]}
+
+
+def predictions_to_mapviz(preds, targets, classes):
+    """Listas de predicciones y targets (en el orden del dataset) -> (gts, preds) de mapviz,
+    el mismo formato que `collect_predictions`."""
+    gts, out = [], []
+    for idx, (t, o) in enumerate(zip(targets, preds)):
+        img = str(idx)
+        for b, l in zip(torch.as_tensor(t["boxes"]).tolist(), t["labels"].tolist()):
+            gts.append(dict(img=img, cls=classes[l], box=tuple(b)))
+        for b, l, s in zip(o["boxes"].tolist(), o["labels"].tolist(), o["scores"].tolist()):
+            out.append(dict(img=img, cls=classes[l], box=tuple(b), score=s))
+    return gts, out
 
 
 # ----------------------------------------------------------------------------

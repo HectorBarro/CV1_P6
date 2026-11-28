@@ -13,3 +13,7 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Datos convertidos y carpetas de ultralytics (YOLOv10)
+data/
+runs/
